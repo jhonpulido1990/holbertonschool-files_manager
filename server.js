@@ -1,10 +1,14 @@
-import express from 'express';
-import routes from './routes/index';
+const express = require('express');
+const router = require('./routes/index');
 
 const app = express();
-app.use(express.json());
-app.use(routes);
+const port = 5000;
 
-const databasePort = process.env.PORT || 5000;
-app.listen(databasePort, () => console.log(`Database live on localhost:${databasePort}`));
+app.use(express.json());
+app.use(router);
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
+
 export default app;
