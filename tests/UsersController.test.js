@@ -1,143 +1,32 @@
-/* eslint-disable */
 import crypto from 'crypto';
-import { ObjectID } from 'mongodb';
-import chai, { expect } from 'chai';
-import chaiHttp from 'chai-http';
-import app from '../server';
+import Queue from 'bull';
 import dbClient from '../utils/db';
-import redisClient from '../utils/redis';
-import { getRandomInt, credsFromAuthHeaderString, findUserByCreds, deleteAndCreateAuthTestData, deleteAllUsersAndFiles } from '../utils/helpers';
+import { checkAuth, findUserById } from '../utils/helpers';
 
-chai.use(chaiHttp);
-const requester = chai.request(app).keepOpen();
-const randomUserId = getRandomInt(1, 99999999);
-const randomPassword = getRandomInt(1, 99999999);
-let token;
+class UsersController {
+  static async postNew(request, response) {
+    const userQueue = new Queue('userQueue');
+    const { email, password } = request.body;
+    if (!email) return response.status(400).json({ error: 'Missing email' });
+    if (!password) return response.status(400).json({ error: 'Missing password' });
 
-describe('UsersController', () => {
-  beforeEach(async () => { await deleteAndCreateAuthTestData(); });
+    const userExistsArray = await dbClient.users.find({ email }).toArray();
+    if (userExistsArray.length > 0) return response.status(400).json({ error: 'Already exist' });
 
-  afterEach(async () => { await deleteAllUsersAndFiles(); });
+    const hashedPassword = crypto.createHash('SHA1').update(password).digest('hex');
+    const resultObj = await dbClient.users.insertOne({ email, password: hashedPassword });
+    const createdUser = { id: resultObj.ops[0]._id, email: resultObj.ops[0].email };
+    await userQueue.add({ userId: createdUser.id });
+    return response.status(201).json(createdUser);
+  }
 
-  after(() => {
-    requester.close();
-  });
+  static async getMe(request, response) {
+    const userId = await checkAuth(request);
+    if (!userId) return response.status(401).json({ error: 'Unauthorized' });
+    const user = await findUserById(userId);
+    if (!user) return response.status(401).json({ error: 'Unauthorized' });
+    return response.json({ id: user._id, email: user.email });
+  }
+}
 
-  it('POST /users with a random new user', (done) => {
-    const bodyData = {
-      email: `testuser${randomUserId}@email.com`,
-      password: `${randomPassword}abcde`,
-    };
-    requester
-      .post('/users')
-      .send(bodyData)
-      .end(async (err, res) => {
-        expect(err).to.be.null;
-        expect(res).to.have.status(201);
-        expect(res.body).to.have.property('email');
-        expect(res.body).to.have.property('id');
-        expect(res.body.email).to.equal(bodyData.email);
-
-        const userArray = await dbClient.users.find({
-          _id: ObjectID(res.body.id),
-          email: bodyData.email,
-        }).toArray();
-        const user = userArray[0];
-        const hashedPassword = crypto.createHash('SHA1').update(bodyData.password).digest('hex');
-        expect(userArray.length).to.be.greaterThan(0);
-        expect(user.email).to.equal(bodyData.email);
-        expect(user._id.toString()).to.equal(ObjectID(res.body.id).toString());
-        expect(user.password).to.equal(hashedPassword);
-        done();
-      });
-  });
-
-  it('POST /users with user that already exists', (done) => {
-    const bodyData = {
-      email: 'bob@dylan.com',
-      password: 'toto1234!',
-    };
-    requester
-      .post('/users')
-      .send(bodyData)
-      .end((err, res) => {
-        expect(err).to.be.null;
-        expect(res).to.have.status(400);
-        expect(res.body.error).to.equal('Already exist');
-        done();
-      });
-  });
-
-  it('POST /users with missing email', (done) => {
-    const bodyData = {
-      password: `${randomPassword}abcde`,
-    };
-    requester
-      .post('/users')
-      .send(bodyData)
-      .end((err, res) => {
-        expect(err).to.be.null;
-        expect(res).to.have.status(400);
-        expect(res.body.error).to.equal('Missing email');
-        done();
-      });
-  });
-
-  it('POST /users with missing password', (done) => {
-    const bodyData = {
-      email: `testuser${randomUserId}@email.com`,
-    };
-    requester
-      .post('/users')
-      .send(bodyData)
-      .end((err, res) => {
-        expect(err).to.be.null;
-        expect(res).to.have.status(400);
-        expect(res.body).to.deep.equal({ error: 'Missing password' });
-        done();
-      });
-  });
-
-  it('GET /users/me with valid user', (done) => {
-    const headerData = {
-      Authorization: 'Basic Ym9iQGR5bGFuLmNvbTp0b3RvMTIzNCE=',
-    };
-
-    requester
-      .get('/connect')
-      .set(headerData)
-      .then(async (res) => {
-        const creds = await credsFromAuthHeaderString(headerData.Authorization);
-        const user = await findUserByCreds(creds.email, creds.password);
-        token = res.body.token;
-        expect(res).to.have.status(200);
-        const tokenHeader = { 'X-Token': token };
-        requester
-          .get('/users/me')
-          .set(tokenHeader)
-          .then(async (res) => {
-            expect(res).to.have.status(200);
-            expect(res.body).to.have.property('id');
-            expect(res.body).to.have.property('email');
-            expect(res.body.id.length).to.equal(24);
-            expect(res.body.id.toString()).to.equal(user._id.toString());
-            expect(await redisClient.get(`auth_${token}`)).to.equal(res.body.id);
-            expect(res.body.email).to.equal('bob@dylan.com');
-            done();
-          });
-      });
-  });
-
-  it('GET /users/me with invalid user', (done) => {
-    const headerData = { 'X-Token': '031bffac-3edc-4e51-aaae-1c121317da8a' };
-    requester
-      .get('/users/me')
-      .send(headerData)
-      .end((err, res) => {
-        expect(err).to.be.null;
-        expect(res).to.have.status(401);
-        expect(res.body.error).to.equal('Unauthorized');
-        done();
-      });
-  });
-});
+export default UsersController;
